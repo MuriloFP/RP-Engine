@@ -3440,6 +3440,46 @@ export async function generateRoutes(app: FastifyInstance) {
         }
       }
 
+      // ── Interval gating: Timeline Agent runs every N messages (default 3) ──
+      if (canonTimelineAgent) {
+        const runInterval =
+          (canonTimelineAgent.settings.runInterval as number) ??
+          (getDefaultBuiltInAgentSettings("canon-timeline").runInterval as number) ??
+          3;
+        if (runInterval > 1) {
+          const lastRun = await agentsStore.getLastSuccessfulRunByType("canon-timeline", input.chatId);
+          if (lastRun) {
+            const lastRunMsgId = lastRun.messageId;
+            const lastRunIdx = allChatMessages.findIndex((m: any) => m.id === lastRunMsgId);
+            const assistantMsgsSince =
+              lastRunIdx >= 0 ? allChatMessages.slice(lastRunIdx + 1).filter((m: any) => m.role === "assistant") : [];
+            if (assistantMsgsSince.length + 1 < runInterval) {
+              resolvedAgents.splice(resolvedAgents.indexOf(canonTimelineAgent), 1);
+            }
+          }
+        }
+      }
+
+      // ── Interval gating: Plot Architect runs every N messages (default 5) ──
+      if (plotArchitectAgent) {
+        const runInterval =
+          (plotArchitectAgent.settings.runInterval as number) ??
+          (getDefaultBuiltInAgentSettings("plot-architect").runInterval as number) ??
+          5;
+        if (runInterval > 1) {
+          const lastRun = await agentsStore.getLastSuccessfulRunByType("plot-architect", input.chatId);
+          if (lastRun) {
+            const lastRunMsgId = lastRun.messageId;
+            const lastRunIdx = allChatMessages.findIndex((m: any) => m.id === lastRunMsgId);
+            const assistantMsgsSince =
+              lastRunIdx >= 0 ? allChatMessages.slice(lastRunIdx + 1).filter((m: any) => m.role === "assistant") : [];
+            if (assistantMsgsSince.length + 1 < runInterval) {
+              resolvedAgents.splice(resolvedAgents.indexOf(plotArchitectAgent), 1);
+            }
+          }
+        }
+      }
+
       // Populate writable lorebook IDs for the lorebook-keeper agent
       if (resolvedAgents.some((a) => a.type === "lorebook-keeper")) {
         const { writableLorebookIds, targetLorebookId, targetLorebookName } = await resolveLorebookKeeperTarget({
@@ -3498,7 +3538,12 @@ export async function generateRoutes(app: FastifyInstance) {
           const { join: joinPath, extname: extnameFs } = await import("path");
           const spritesRoot = joinPath(DATA_DIR, "sprites");
           const spriteExts = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"]);
-          const perChar: Array<{ characterId: string; characterName: string; expressions: string[] }> = [];
+          const perChar: Array<{
+            characterId: string;
+            characterName: string;
+            expressions: string[];
+            variants?: Array<{ label: string; description: string }>;
+          }> = [];
           for (const char of agentContext.characters) {
             const charDir = joinPath(spritesRoot, char.id);
             if (!existsSyncFs(charDir)) continue;
@@ -3508,7 +3553,27 @@ export async function generateRoutes(app: FastifyInstance) {
               perChar.push({ characterId: char.id, characterName: char.name, expressions: exprNames });
             }
           }
+          // Enrich with lorebook sprite variant descriptions (outfit selection)
           if (perChar.length > 0) {
+            for (const charSprite of perChar) {
+              try {
+                const charLorebooks = await lorebooksStore.listByCharacter(charSprite.characterId);
+                for (const lb of charLorebooks) {
+                  const entries = await lorebooksStore.listEntries(lb.id);
+                  for (const entry of entries) {
+                    const ds = (entry as any).dynamicState as Record<string, unknown> | undefined;
+                    const sprites = ds?.sprites as Array<{ label: string; description: string }> | undefined;
+                    if (sprites && Array.isArray(sprites) && sprites.length > 1) {
+                      charSprite.variants = sprites;
+                      break;
+                    }
+                  }
+                  if (charSprite.variants) break;
+                }
+              } catch {
+                /* non-critical — variants just won't be available */
+              }
+            }
             agentContext.memory._availableSprites = perChar;
           }
         } catch {
@@ -3605,6 +3670,110 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         } catch {
           /* non-critical */
+        }
+      }
+
+      // If the canon-timeline agent is enabled, load its previous state + lorebook events
+      const canonTimelineAgent = resolvedAgents.find((a) => a.type === "canon-timeline");
+      if (canonTimelineAgent) {
+        try {
+          const mem = await agentsStore.getMemory(canonTimelineAgent.id, input.chatId);
+          const state: Record<string, unknown> = {};
+          if (mem.storyPosition != null) state.storyPosition = mem.storyPosition;
+          if (mem.events) state.events = mem.events;
+          if (mem.activePressures) state.activePressures = mem.activePressures;
+          if (mem.entityDivergences) state.entityDivergences = mem.entityDivergences;
+          if (mem.butterflyEffects) state.butterflyEffects = mem.butterflyEffects;
+          if (mem.narrativeDebt) state.narrativeDebt = mem.narrativeDebt;
+          if (mem.narrativeWindow) state.narrativeWindow = mem.narrativeWindow;
+          if (Object.keys(state).length > 0) {
+            agentContext.memory._timelineState = state;
+          }
+          if (mem.auPremise) {
+            agentContext.memory._auPremise = mem.auPremise as string;
+          }
+        } catch {
+          /* non-critical */
+        }
+
+        // Load event entries + build entity index from source lorebooks
+        try {
+          const sourceIds = (canonTimelineAgent.settings.sourceLorebookIds as string[]) ?? chatActiveLorebookIds;
+          if (sourceIds.length > 0) {
+            const entries = await lorebooksStore.listEntriesByLorebooks(sourceIds);
+            const activeEntries = entries.filter((e: any) => e.enabled !== false);
+
+            // Events: entries tagged as "event" — sent in full for timeline tracking
+            const eventEntries = activeEntries
+              .filter((e: any) => e.tag === "event")
+              .map((e: any) => ({
+                id: e.id,
+                name: e.name,
+                content: e.content,
+                keys: e.keys,
+                dynamicState: e.dynamicState,
+                relationships: e.relationships,
+              }));
+            if (eventEntries.length > 0) {
+              agentContext.memory._timelineEvents = eventEntries;
+            }
+
+            // Entity index: compressed non-event entries (~25 tokens each)
+            const entityIndex = activeEntries
+              .filter((e: any) => e.tag !== "event")
+              .map((e: any) => {
+                const desc = e.description ? ` — ${e.description.slice(0, 80)}` : "";
+                return `${e.name} [${e.tag || "misc"}]${desc}`;
+              })
+              .join("\n");
+            if (entityIndex) {
+              agentContext.memory._entityIndex = entityIndex;
+            }
+          }
+        } catch {
+          /* non-critical */
+        }
+      }
+
+      // If the plot-architect agent is enabled, load its previous state
+      const plotArchitectAgent = resolvedAgents.find((a) => a.type === "plot-architect");
+      if (plotArchitectAgent) {
+        try {
+          const mem = await agentsStore.getMemory(plotArchitectAgent.id, input.chatId);
+          const state: Record<string, unknown> = {};
+          if (mem.arcs) state.arcs = mem.arcs;
+          if (mem.offScreenUpdate) state.offScreenUpdate = mem.offScreenUpdate;
+          if (mem.nextEscalation) state.nextEscalation = mem.nextEscalation;
+          if (Object.keys(state).length > 0) {
+            agentContext.memory._plotArchitectState = state;
+          }
+        } catch {
+          /* non-critical */
+        }
+
+        // Load timeline state for plot architect's awareness (if timeline agent ran)
+        if (agentContext.memory._timelineState) {
+          agentContext.memory._timelineState = agentContext.memory._timelineState;
+        }
+
+        // Feed quest outcomes from game state so Plot Architect can observe and adapt
+        if (gameState?.playerStats) {
+          const ps = typeof gameState.playerStats === "string"
+            ? JSON.parse(gameState.playerStats as string)
+            : gameState.playerStats;
+          const quests = ps?.activeQuests as any[] | undefined;
+          if (quests && quests.length > 0) {
+            agentContext.memory._questOutcomes = quests.map((q: any) => ({
+              name: q.name,
+              status: q.status ?? (q.completed ? "completed" : "active"),
+              objectives: q.objectives,
+            }));
+          }
+        }
+
+        // Also share SPD state so Plot Architect knows about existing scene directions
+        if (agentContext.memory._secretPlotState) {
+          agentContext.memory._spdState = agentContext.memory._secretPlotState;
         }
       }
 
@@ -4315,7 +4484,35 @@ export async function generateRoutes(app: FastifyInstance) {
                 );
               }
               const _tAgents = Date.now();
-              const injections = await pipeline.preGenerate((t) => !EXCLUDED_FROM_PIPELINE.has(t));
+
+              // Two-pass pre-generation: Timeline Agent runs first so its output
+              // is available to Plot Architect and Secret Plot Driver.
+              const hasTimelineAgent = pipelineAgents.some(
+                (a) => a.type === "canon-timeline" && a.phase === "pre_generation",
+              );
+              let injections: AgentInjection[];
+              if (hasTimelineAgent) {
+                // Pass 1: Timeline Agent only
+                const tlInjections = await pipeline.preGenerate(
+                  (t) => t === "canon-timeline",
+                );
+                // Feed timeline output into context for dependent agents
+                const tlResult = pipeline.results.find((r) => r.type === "canon_timeline");
+                if (tlResult?.success && tlResult.data && typeof tlResult.data === "object") {
+                  const tlData = tlResult.data as Record<string, unknown>;
+                  if (tlData.activePressures || tlData.entityDivergences || tlData.narrativeDebt) {
+                    agentContext.memory._timelineState = tlData;
+                  }
+                }
+                // Pass 2: everything else
+                const restInjections = await pipeline.preGenerate(
+                  (t) => !EXCLUDED_FROM_PIPELINE.has(t) && t !== "canon-timeline",
+                );
+                injections = [...tlInjections, ...restInjections];
+              } else {
+                injections = await pipeline.preGenerate((t) => !EXCLUDED_FROM_PIPELINE.has(t));
+              }
+
               logger.debug(`[timing] Pre-gen agents: ${Date.now() - _tAgents}ms`);
               return injections;
             })()
@@ -4507,6 +4704,75 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
+        // ── Canon Timeline: persist fresh state ──
+        const timelineResult = preGenResults.find((r) => r.type === "canon_timeline");
+        if (timelineResult?.success && timelineResult.data && typeof timelineResult.data === "object") {
+          const tlData = timelineResult.data as Record<string, unknown>;
+          const agentConfigId = canonTimelineAgent?.id ?? timelineResult.agentId;
+
+          try {
+            if (tlData.storyPosition != null) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "storyPosition", tlData.storyPosition);
+            }
+            if (tlData.events) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "events", tlData.events);
+            }
+            if (tlData.activePressures) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "activePressures", tlData.activePressures);
+            }
+            if (tlData.entityDivergences) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "entityDivergences", tlData.entityDivergences);
+            }
+            if (tlData.butterflyEffects) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "butterflyEffects", tlData.butterflyEffects);
+            }
+            if (tlData.narrativeDebt) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "narrativeDebt", tlData.narrativeDebt);
+            }
+            if (tlData.narrativeWindow) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "narrativeWindow", tlData.narrativeWindow);
+            }
+            if (tlData.auPremise) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "auPremise", tlData.auPremise);
+            }
+            logger.debug(
+              "[canon-timeline] Persisted pre-gen state — position: %s, events: %d, pressures: %d, divergences: %d",
+              tlData.storyPosition ?? "unknown",
+              Array.isArray(tlData.events) ? tlData.events.length : 0,
+              Array.isArray(tlData.activePressures) ? tlData.activePressures.length : 0,
+              Array.isArray(tlData.entityDivergences) ? tlData.entityDivergences.length : 0,
+            );
+          } catch (persistErr) {
+            logger.error(persistErr, "[canon-timeline] Failed to persist state");
+          }
+        }
+
+        // ── Plot Architect: persist fresh state ──
+        const architectResult = preGenResults.find((r) => r.type === "plot_architect");
+        if (architectResult?.success && architectResult.data && typeof architectResult.data === "object") {
+          const archData = architectResult.data as Record<string, unknown>;
+          const agentConfigId = plotArchitectAgent?.id ?? architectResult.agentId;
+
+          try {
+            if (archData.arcs) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "arcs", archData.arcs);
+            }
+            if (archData.offScreenUpdate) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "offScreenUpdate", archData.offScreenUpdate);
+            }
+            if (archData.nextEscalation) {
+              await agentsStore.setMemory(agentConfigId, input.chatId, "nextEscalation", archData.nextEscalation);
+            }
+            logger.debug(
+              "[plot-architect] Persisted pre-gen state — arcs: %d, escalation: %s",
+              Array.isArray(archData.arcs) ? archData.arcs.length : 0,
+              archData.nextEscalation ? "yes" : "none",
+            );
+          } catch (persistErr) {
+            logger.error(persistErr, "[plot-architect] Failed to persist state");
+          }
+        }
+
         // Inject pre-gen agent context at depth 0 (very bottom of prompt)
         if (contextInjections.length > 0) {
           const wrapped = formatAgentInjections(contextInjections, wrapFormat);
@@ -4575,10 +4841,26 @@ export async function generateRoutes(app: FastifyInstance) {
           );
           if (hasContextInjectionAgents) {
             reply.raw.write(`data: ${JSON.stringify({ type: "agent_start", data: { phase: "pre_generation" } })}\n\n`);
-            // On regens, exclude secret-plot-driver — it only triggers on new user messages
-            contextInjections = await pipeline.preGenerate(
-              (agentType) => !EXCLUDED_FROM_PIPELINE.has(agentType) && agentType !== "secret-plot-driver",
+            // On regens, exclude secret-plot-driver and plot-architect — they only trigger on new user messages
+            const regenExclude = new Set([...EXCLUDED_FROM_PIPELINE, "secret-plot-driver", "plot-architect"]);
+            const regenHasTimeline = resolvedAgents.some(
+              (a) => a.type === "canon-timeline" && a.phase === "pre_generation",
             );
+            if (regenHasTimeline) {
+              const tlInj = await pipeline.preGenerate((t) => t === "canon-timeline");
+              const tlRes = pipeline.results.find((r) => r.type === "canon_timeline");
+              if (tlRes?.success && tlRes.data && typeof tlRes.data === "object") {
+                agentContext.memory._timelineState = tlRes.data as Record<string, unknown>;
+              }
+              const restInj = await pipeline.preGenerate(
+                (t) => !regenExclude.has(t) && t !== "canon-timeline",
+              );
+              contextInjections = [...tlInj, ...restInj];
+            } else {
+              contextInjections = await pipeline.preGenerate(
+                (agentType) => !regenExclude.has(agentType),
+              );
+            }
 
             // Failure gate — same as the new-message path
             const regenPreGenResults = pipeline.results.filter(
@@ -4767,6 +5049,179 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         } catch (plotInjectErr) {
           logger.error(plotInjectErr, "[secret-plot-driver] Failed to inject arc/directions");
+        }
+      }
+
+      // ────────────────────────────────────────
+      // Canon Timeline: inject entity divergences + narrative context
+      // Divergences → correction layer after lorebook entries in <lore>
+      // Active pressures + narrative debt → inside the <context> tracker block
+      // ────────────────────────────────────────
+      if (canonTimelineAgent) {
+        try {
+          const tlMem = await agentsStore.getMemory(canonTimelineAgent.id, input.chatId);
+
+          // Inject entity divergences as corrections to stale lorebook entries
+          const divergences = tlMem.entityDivergences as Array<{ entity: string; field: string; original: string; current: string }> | undefined;
+          if (divergences && divergences.length > 0) {
+            const divLines = divergences.map((d) => `- ${d.entity}: ${d.field} changed from "${d.original}" to "${d.current}"`).join("\n");
+            const divBlock = wrapContent(
+              `These characters/entities have changed from their lorebook descriptions. Use the CURRENT state, not the original:\n${divLines}`,
+              "entity_divergences",
+              wrapFormat,
+            );
+
+            let injected = false;
+            if (wrapFormat === "xml") {
+              for (let i = 0; i < finalMessages.length; i++) {
+                const msg = finalMessages[i]!;
+                if (msg.role !== "system" || !msg.content.includes("</lore>")) continue;
+                const loreMatch = msg.content.match(/^([ \t]*)<\/lore>/m);
+                const indent = loreMatch?.[1] ?? "";
+                const innerIndent = indent + "    ";
+                const indentedDiv = divBlock.replace(/\n/g, "\n" + innerIndent);
+                finalMessages[i] = {
+                  ...msg,
+                  content: msg.content.replace("</lore>", `${innerIndent}${indentedDiv}\n${indent}</lore>`),
+                };
+                injected = true;
+                break;
+              }
+            }
+            if (!injected) {
+              const firstChatIdx = finalMessages.findIndex((m) => m.role === "user" || m.role === "assistant");
+              const insertAt = firstChatIdx >= 0 ? firstChatIdx : finalMessages.length;
+              finalMessages.splice(insertAt, 0, { role: "system", content: divBlock });
+            }
+          }
+
+          // Inject active pressures + narrative debt into context tracker
+          const pressures = tlMem.activePressures as Array<{ source: string; pressure: string }> | undefined;
+          const narrativeDebt = tlMem.narrativeDebt as Record<string, unknown> | undefined;
+          const contextParts: string[] = [];
+
+          if (pressures && pressures.length > 0) {
+            contextParts.push("Active narrative pressures (unresolved tensions driving the story):");
+            for (const p of pressures) {
+              contextParts.push(`- [${p.source}] ${p.pressure}`);
+            }
+          }
+          if (narrativeDebt && typeof narrativeDebt === "object") {
+            const level = (narrativeDebt as any).level ?? "unknown";
+            const signal = (narrativeDebt as any).signal ?? "";
+            if (level !== "balanced" && signal) {
+              contextParts.push(`Narrative debt: ${level} — ${signal}`);
+            }
+          }
+
+          if (contextParts.length > 0) {
+            const pressureBlock = wrapContent(contextParts.join("\n"), "timeline_context", wrapFormat);
+            if (wrapFormat === "xml") {
+              const ctxIdx = finalMessages.findIndex((m) => m.role === "system" && m.content.includes("<context>"));
+              if (ctxIdx >= 0) {
+                const ctxMsg = finalMessages[ctxIdx]!;
+                finalMessages[ctxIdx] = {
+                  ...ctxMsg,
+                  content: ctxMsg.content.replace("</context>", `    ${pressureBlock.replace(/\n/g, "\n    ")}\n</context>`),
+                };
+              } else {
+                const lastUserIdx = findLastIndex(finalMessages, "user");
+                finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                  role: "system",
+                  content: `<context>\n    ${pressureBlock.replace(/\n/g, "\n    ")}\n</context>`,
+                });
+              }
+            } else if (wrapFormat === "markdown") {
+              const ctxIdx = finalMessages.findIndex((m) => m.role === "system" && m.content.includes("# Context"));
+              if (ctxIdx >= 0) {
+                const ctxMsg = finalMessages[ctxIdx]!;
+                finalMessages[ctxIdx] = { ...ctxMsg, content: ctxMsg.content + "\n" + pressureBlock };
+              } else {
+                const lastUserIdx = findLastIndex(finalMessages, "user");
+                finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                  role: "system",
+                  content: `# Context\n${pressureBlock}`,
+                });
+              }
+            } else {
+              const lastUserIdx = findLastIndex(finalMessages, "user");
+              finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                role: "system",
+                content: pressureBlock,
+              });
+            }
+          }
+        } catch (tlInjectErr) {
+          logger.error(tlInjectErr, "[canon-timeline] Failed to inject divergences/pressures");
+        }
+      }
+
+      // ────────────────────────────────────────
+      // Plot Architect: inject active arcs + off-screen updates
+      // Arc summaries → inside the <context> tracker block
+      // ────────────────────────────────────────
+      if (plotArchitectAgent) {
+        try {
+          const archMem = await agentsStore.getMemory(plotArchitectAgent.id, input.chatId);
+          const arcs = archMem.arcs as Array<{
+            name: string;
+            type: string;
+            rootCause: string;
+            threads: Array<{ name: string; offScreenProgress?: string }>;
+          }> | undefined;
+          const offScreenUpdate = archMem.offScreenUpdate as string | undefined;
+
+          const arcParts: string[] = [];
+          if (arcs && arcs.length > 0) {
+            arcParts.push("Active story arcs (ongoing narrative threads — advance naturally, don't force):");
+            for (const arc of arcs) {
+              const threadNames = arc.threads?.map((t) => t.name).join(", ") ?? "";
+              arcParts.push(`- [${arc.type}] ${arc.name}: ${arc.rootCause}${threadNames ? ` (threads: ${threadNames})` : ""}`);
+            }
+          }
+          if (offScreenUpdate) {
+            arcParts.push(`Off-screen update: ${offScreenUpdate}`);
+          }
+
+          if (arcParts.length > 0) {
+            const arcBlock = wrapContent(arcParts.join("\n"), "plot_architect", wrapFormat);
+            if (wrapFormat === "xml") {
+              const ctxIdx = finalMessages.findIndex((m) => m.role === "system" && m.content.includes("<context>"));
+              if (ctxIdx >= 0) {
+                const ctxMsg = finalMessages[ctxIdx]!;
+                finalMessages[ctxIdx] = {
+                  ...ctxMsg,
+                  content: ctxMsg.content.replace("</context>", `    ${arcBlock.replace(/\n/g, "\n    ")}\n</context>`),
+                };
+              } else {
+                const lastUserIdx = findLastIndex(finalMessages, "user");
+                finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                  role: "system",
+                  content: `<context>\n    ${arcBlock.replace(/\n/g, "\n    ")}\n</context>`,
+                });
+              }
+            } else if (wrapFormat === "markdown") {
+              const ctxIdx = finalMessages.findIndex((m) => m.role === "system" && m.content.includes("# Context"));
+              if (ctxIdx >= 0) {
+                const ctxMsg = finalMessages[ctxIdx]!;
+                finalMessages[ctxIdx] = { ...ctxMsg, content: ctxMsg.content + "\n" + arcBlock };
+              } else {
+                const lastUserIdx = findLastIndex(finalMessages, "user");
+                finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                  role: "system",
+                  content: `# Context\n${arcBlock}`,
+                });
+              }
+            } else {
+              const lastUserIdx = findLastIndex(finalMessages, "user");
+              finalMessages.splice(lastUserIdx >= 0 ? lastUserIdx : finalMessages.length, 0, {
+                role: "system",
+                content: arcBlock,
+              });
+            }
+          }
+        } catch (archInjectErr) {
+          logger.error(archInjectErr, "[plot-architect] Failed to inject arcs");
         }
       }
 
@@ -6646,28 +7101,50 @@ export async function generateRoutes(app: FastifyInstance) {
                 for (const u of updates) {
                   const idx = quests.findIndex((q: any) => q.name === u.questName);
                   if (u.action === "create" && idx === -1) {
-                    quests.push({
+                    const newQuest: Record<string, unknown> = {
                       questEntryId: u.questName,
                       name: u.questName,
                       currentStage: 0,
                       objectives: u.objectives ?? [],
                       completed: false,
-                    });
+                      status: u.mandatory ? "active" : "pending",
+                    };
+                    if (u.description) newQuest.description = u.description;
+                    if (u.mandatory != null) newQuest.mandatory = !!u.mandatory;
+                    if (u.difficulty) newQuest.difficulty = u.difficulty;
+                    if (u.rewards) newQuest.rewards = u.rewards;
+                    if (u.failurePenalty) newQuest.failurePenalty = u.failurePenalty;
+                    if (u.rejectionConsequences !== undefined) newQuest.rejectionConsequences = u.rejectionConsequences;
+                    if (u.hidden != null) newQuest.hidden = !!u.hidden;
+                    quests.push(newQuest);
                   } else if (idx !== -1) {
                     if (u.action === "update") {
                       if (u.objectives) quests[idx].objectives = u.objectives;
+                      if (u.description) quests[idx].description = u.description;
+                      if (u.rewards) quests[idx].rewards = u.rewards;
+                      if (u.failurePenalty) quests[idx].failurePenalty = u.failurePenalty;
+                      if (u.hidden != null) quests[idx].hidden = u.hidden;
                     } else if (u.action === "complete") {
                       quests[idx].completed = true;
+                      quests[idx].status = "completed";
                       if (u.objectives) quests[idx].objectives = u.objectives;
                     } else if (u.action === "fail") {
-                      quests.splice(idx, 1);
+                      quests[idx].completed = true;
+                      quests[idx].status = "failed";
+                      if (u.objectives) quests[idx].objectives = u.objectives;
+                    } else if (u.action === "reject") {
+                      quests[idx].status = "rejected";
+                    } else if (u.action === "accept") {
+                      quests[idx].status = "active";
                     }
                   }
                 }
                 // Auto-remove quests that are fully completed (all objectives done)
+                // but keep failed/rejected quests visible for a while
                 for (let i = quests.length - 1; i >= 0; i--) {
                   const q = quests[i];
                   if (
+                    q.status === "completed" &&
                     q.completed &&
                     Array.isArray(q.objectives) &&
                     q.objectives.length > 0 &&
@@ -6694,13 +7171,15 @@ export async function generateRoutes(app: FastifyInstance) {
 
                   // Auto-populate journal: quest updates
                   for (const u of updates) {
+                    const journalStatus =
+                      u.action === "complete" ? "completed"
+                        : u.action === "fail" ? "failed"
+                        : u.action === "reject" ? "failed"
+                        : "active";
                     const questData = {
                       id: u.questName,
                       name: u.questName,
-                      status: (u.action === "complete" ? "completed" : u.action === "fail" ? "failed" : "active") as
-                        | "active"
-                        | "completed"
-                        | "failed",
+                      status: journalStatus as "active" | "completed" | "failed",
                       description: u.description || u.questName,
                       objectives: (u.objectives ?? []).map((o: any) =>
                         typeof o === "string" ? o : o.text || o.description || "",

@@ -255,14 +255,39 @@ async function buildRetryAgentContext(args: {
   // If the expression agent is being retried, load available sprite expressions per character
   if (resolvedAgentTypes.has("expression")) {
     try {
-      const perChar: Array<{ characterId: string; characterName: string; expressions: string[] }> = [];
+      const perChar: Array<{
+        characterId: string;
+        characterName: string;
+        expressions: string[];
+        variants?: Array<{ label: string; description: string }>;
+      }> = [];
       for (const char of agentContext.characters) {
         const sprites = listCharacterSprites(char.id);
         if (sprites && sprites.expressions.length > 0) {
           perChar.push({ characterId: char.id, characterName: char.name, expressions: sprites.expressions });
         }
       }
+      // Enrich with lorebook sprite variant descriptions (outfit selection)
       if (perChar.length > 0) {
+        for (const charSprite of perChar) {
+          try {
+            const charLorebooks = await lorebooksStore.listByCharacter(charSprite.characterId);
+            for (const lb of charLorebooks) {
+              const entries = await lorebooksStore.listEntries(lb.id);
+              for (const entry of entries) {
+                const ds = (entry as any).dynamicState as Record<string, unknown> | undefined;
+                const spriteVariants = ds?.sprites as Array<{ label: string; description: string }> | undefined;
+                if (spriteVariants && Array.isArray(spriteVariants) && spriteVariants.length > 1) {
+                  charSprite.variants = spriteVariants;
+                  break;
+                }
+              }
+              if (charSprite.variants) break;
+            }
+          } catch {
+            /* non-critical */
+          }
+        }
         agentContext.memory._availableSprites = perChar;
       }
     } catch (err) {

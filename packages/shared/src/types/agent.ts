@@ -37,7 +37,9 @@ export type AgentResultType =
   | "game_master_narration"
   | "party_action"
   | "game_map_update"
-  | "game_state_transition";
+  | "game_state_transition"
+  | "canon_timeline"
+  | "plot_architect";
 
 /** Configuration for a single agent. */
 export interface AgentConfig {
@@ -179,6 +181,8 @@ export const BUILT_IN_AGENT_IDS = {
   SECRET_PLOT_DRIVER: "secret-plot-driver",
   GAME_MASTER: "game-master",
   PARTY_PLAYER: "party-player",
+  CANON_TIMELINE: "canon-timeline",
+  PLOT_ARCHITECT: "plot-architect",
 } as const;
 
 export type AgentCategory = "writer" | "tracker" | "misc";
@@ -452,12 +456,34 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     defaultInjectAsSection: true,
     category: "writer",
   },
+  {
+    id: "canon-timeline",
+    name: "Timeline Tracker",
+    description:
+      "Tracks story events against a canon timeline (from lorebooks) and/or Plot Architect arcs. Monitors divergences, traces underlying pressures when events are prevented, and tracks butterfly effects. Works for fandom self-inserts, post-canon, AU, and original settings.",
+    phase: "pre_generation",
+    enabledByDefault: false,
+    defaultInjectAsSection: true,
+    category: "tracker",
+  },
+  {
+    id: "plot-architect",
+    name: "Plot Architect",
+    description:
+      "Creates deep, multi-threaded story arcs grounded in the world's lore, factions, and character motivations. Arcs progress off-screen, escalate when ignored, and interconnect with each other and canon events. Like a tabletop RPG Game Master who has prepped a campaign.",
+    phase: "pre_generation",
+    enabledByDefault: false,
+    defaultInjectAsSection: true,
+    category: "writer",
+  },
 ];
 
 export const BUILT_IN_AGENT_RUN_INTERVAL_DEFAULTS: Readonly<Record<string, number>> = {
   director: 5,
   "lorebook-keeper": 8,
   "chat-summary": 5,
+  "canon-timeline": 3,
+  "plot-architect": 5,
 };
 
 export const DEFAULT_AGENT_CONTEXT_SIZE = 5;
@@ -520,6 +546,8 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   haptic: [],
   cyoa: [],
   "secret-plot-driver": [],
+  "canon-timeline": [],
+  "plot-architect": [],
   "game-master": ["roll_dice", "update_game_state"],
   "party-player": [],
 };

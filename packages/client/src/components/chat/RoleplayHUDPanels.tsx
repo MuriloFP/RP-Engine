@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  AlertTriangle,
+  Ban,
   CalendarDays,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Circle,
   Clock,
   CloudSun,
+  EyeOff,
+  Gift,
   ImagePlus,
   MapPin,
   Package,
   Pencil,
   Plus,
   Scroll,
+  Shield,
   Sparkles,
   SlidersHorizontal,
   Swords,
@@ -29,6 +37,8 @@ import type {
   InventoryItem,
   PresentCharacter,
   QuestProgress,
+  QuestReward,
+  QuestPenalty,
 } from "@marinara-engine/shared";
 
 interface CombinedPlayerPanelProps {
@@ -1227,6 +1237,22 @@ function StatBarEditable({
   );
 }
 
+const DIFFICULTY_COLORS: Record<string, string> = {
+  trivial: "text-gray-400",
+  easy: "text-emerald-400",
+  moderate: "text-amber-400",
+  hard: "text-orange-400",
+  deadly: "text-red-400",
+};
+
+const STATUS_STYLES: Record<string, { icon: typeof Target; color: string; label: string }> = {
+  pending: { icon: Circle, color: "text-blue-400", label: "Pending" },
+  active: { icon: Target, color: "text-amber-400", label: "Active" },
+  completed: { icon: CheckCircle2, color: "text-emerald-400", label: "Done" },
+  failed: { icon: AlertTriangle, color: "text-red-400", label: "Failed" },
+  rejected: { icon: Ban, color: "text-gray-400", label: "Rejected" },
+};
+
 function QuestCardEditable({
   quest,
   onUpdate,
@@ -1236,6 +1262,8 @@ function QuestCardEditable({
   onUpdate: (q: QuestProgress) => void;
   onRemove: () => void;
 }) {
+  const [showDetails, setShowDetails] = useState(false);
+
   const addObjective = () => {
     onUpdate({
       ...quest,
@@ -1259,32 +1287,64 @@ function QuestCardEditable({
     onUpdate({ ...quest, objectives: next });
   };
 
-  const completed = quest.objectives.filter((objective) => objective.completed).length;
+  const completedCount = quest.objectives.filter((objective) => objective.completed).length;
   const total = quest.objectives.length;
+  const status = quest.status ?? (quest.completed ? "completed" : "active");
+  const isPending = status === "pending";
+  const isTerminal = status === "completed" || status === "failed" || status === "rejected";
+  const statusStyle = STATUS_STYLES[status] ?? STATUS_STYLES.active!;
+  const StatusIcon = statusStyle.icon;
+
+  const handleAccept = () => onUpdate({ ...quest, status: "active" });
+  const handleReject = () => onUpdate({ ...quest, status: "rejected" });
 
   return (
-    <div className="rounded-lg bg-[var(--muted)]/20 p-2">
+    <div className={cn(
+      "rounded-lg bg-[var(--muted)]/20 p-2",
+      isPending && "ring-1 ring-blue-400/30",
+      quest.hidden && "opacity-70",
+    )}>
+      {/* Header row */}
       <div className="flex items-center gap-1.5">
         <button
-          onClick={() => onUpdate({ ...quest, completed: !quest.completed })}
+          onClick={() => onUpdate({ ...quest, completed: !quest.completed, status: quest.completed ? "active" : "completed" })}
           title={quest.completed ? "Mark incomplete" : "Mark complete"}
         >
-          {quest.completed ? (
-            <CheckCircle2 size="0.6875rem" className="text-emerald-400 shrink-0" />
-          ) : (
-            <Target size="0.6875rem" className="text-amber-400 shrink-0" />
-          )}
+          <StatusIcon size="0.6875rem" className={cn(statusStyle.color, "shrink-0")} />
         </button>
         <InlineEdit
           value={quest.name}
           onSave={(value) => onUpdate({ ...quest, name: value })}
-          className={cn("flex-1 !font-medium", quest.completed && "line-through opacity-50")}
+          className={cn("flex-1 !font-medium", isTerminal && "line-through opacity-50")}
           placeholder="Quest name"
         />
-        {total > 0 && (
-          <span className="text-[0.5625rem] text-[var(--muted-foreground)]/60">
-            {completed}/{total}
-          </span>
+        {/* Badges */}
+        <span className="flex items-center gap-1">
+          {quest.mandatory && (
+            <Shield size="0.5rem" className="text-red-400/70 shrink-0" title="Mandatory" />
+          )}
+          {quest.hidden && (
+            <EyeOff size="0.5rem" className="text-purple-400/70 shrink-0" title="Hidden significance" />
+          )}
+          {quest.difficulty && (
+            <span className={cn("text-[0.5rem] font-medium", DIFFICULTY_COLORS[quest.difficulty] ?? "text-[var(--muted-foreground)]")}>
+              {quest.difficulty}
+            </span>
+          )}
+          {total > 0 && (
+            <span className="text-[0.5625rem] text-[var(--muted-foreground)]/60">
+              {completedCount}/{total}
+            </span>
+          )}
+        </span>
+        {(quest.rewards?.length || quest.failurePenalty?.length || quest.description) && (
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="text-[var(--muted-foreground)]/40 hover:text-[var(--muted-foreground)] transition-colors shrink-0"
+            title="Toggle details"
+          >
+            {showDetails ? <ChevronDown size="0.5625rem" /> : <ChevronRight size="0.5625rem" />}
+          </button>
         )}
         <button
           onClick={onRemove}
@@ -1294,7 +1354,67 @@ function QuestCardEditable({
           <X size="0.5625rem" />
         </button>
       </div>
-      {!quest.completed && (
+
+      {/* Accept/Reject buttons for pending quests */}
+      {isPending && (
+        <div className="mt-1.5 flex items-center gap-1.5 pl-4">
+          <button
+            onClick={handleAccept}
+            className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition-colors"
+          >
+            <Check size="0.5rem" /> Accept
+          </button>
+          {!quest.mandatory && (
+            <button
+              onClick={handleReject}
+              className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            >
+              <Ban size="0.5rem" /> Reject
+            </button>
+          )}
+          {quest.rejectionConsequences && !quest.mandatory && (
+            <span className="text-[0.5rem] text-red-400/60 italic" title={quest.rejectionConsequences}>
+              consequences if rejected
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Expandable details: description, rewards, penalties */}
+      {showDetails && (
+        <div className="mt-1.5 pl-4 space-y-1 text-[0.5625rem]">
+          {quest.description && (
+            <p className="text-[var(--muted-foreground)]/70 italic">{quest.description}</p>
+          )}
+          {quest.rewards && quest.rewards.length > 0 && (
+            <div>
+              <span className="text-emerald-400/70 flex items-center gap-0.5 font-medium">
+                <Gift size="0.5rem" /> Rewards
+              </span>
+              {quest.rewards.map((r: QuestReward, i: number) => (
+                <div key={i} className="pl-3 text-[var(--muted-foreground)]/60">
+                  <span className="text-emerald-400/50">[{r.type}]</span> {r.description}
+                </div>
+              ))}
+            </div>
+          )}
+          {quest.failurePenalty && quest.failurePenalty.length > 0 && (
+            <div>
+              <span className="text-red-400/70 flex items-center gap-0.5 font-medium">
+                <AlertTriangle size="0.5rem" /> Failure Penalties
+              </span>
+              {quest.failurePenalty.map((p: QuestPenalty, i: number) => (
+                <div key={i} className="pl-3 text-[var(--muted-foreground)]/60">
+                  <span className="text-red-400/50">[{p.type}/{p.severity}]</span> {p.description}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Objectives */}
+      {!isTerminal && (
         <div className="mt-1 space-y-0.5 pl-4">
           {quest.objectives.map((objective, idx) => (
             <div key={idx} className="group flex items-center gap-1 text-[0.5625rem]">

@@ -794,10 +794,16 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
       characterId: string;
       characterName: string;
       expressions: string[];
+      variants?: Array<{ label: string; description: string }>;
     }>;
     parts.push(`<available_sprites>`);
     for (const char of sprites) {
-      parts.push(`${char.characterName} (${char.characterId}): ${char.expressions.join(", ")}`);
+      let line = `${char.characterName} (${char.characterId}): ${char.expressions.join(", ")}`;
+      if (char.variants && char.variants.length > 1) {
+        const variantList = char.variants.map((v) => `${v.label} (${v.description})`).join("; ");
+        line += ` | outfit variants: ${variantList}`;
+      }
+      parts.push(line);
     }
     parts.push(`</available_sprites>`);
   }
@@ -915,6 +921,48 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     parts.push(`</secret_plot_state>`);
   }
 
+  if (context.memory._timelineEvents) {
+    parts.push(`<timeline_events>`);
+    parts.push(JSON.stringify(context.memory._timelineEvents));
+    parts.push(`</timeline_events>`);
+  }
+
+  if (context.memory._entityIndex) {
+    parts.push(`<entity_index>`);
+    parts.push(context.memory._entityIndex as string);
+    parts.push(`</entity_index>`);
+  }
+
+  if (context.memory._timelineState) {
+    parts.push(`<timeline_state>`);
+    parts.push(JSON.stringify(context.memory._timelineState));
+    parts.push(`</timeline_state>`);
+  }
+
+  if (context.memory._plotArchitectState) {
+    parts.push(`<plot_architect_state>`);
+    parts.push(JSON.stringify(context.memory._plotArchitectState));
+    parts.push(`</plot_architect_state>`);
+  }
+
+  if (context.memory._questOutcomes) {
+    parts.push(`<quest_outcomes>`);
+    parts.push(JSON.stringify(context.memory._questOutcomes));
+    parts.push(`</quest_outcomes>`);
+  }
+
+  if (context.memory._auPremise) {
+    parts.push(`<au_premise>`);
+    parts.push(context.memory._auPremise as string);
+    parts.push(`</au_premise>`);
+  }
+
+  if (context.memory._spdState) {
+    parts.push(`<spd_state>`);
+    parts.push(JSON.stringify(context.memory._spdState));
+    parts.push(`</spd_state>`);
+  }
+
   return parts.join("\n");
 }
 
@@ -943,6 +991,8 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   haptic: "haptic_command",
   cyoa: "cyoa_choices",
   "secret-plot-driver": "secret_plot",
+  "canon-timeline": "canon_timeline",
+  "plot-architect": "plot_architect",
 };
 
 const AGENT_RESULT_TYPES = new Set<AgentResultType>([
@@ -967,6 +1017,8 @@ const AGENT_RESULT_TYPES = new Set<AgentResultType>([
   "haptic_command",
   "cyoa_choices",
   "secret_plot",
+  "canon_timeline",
+  "plot_architect",
   "game_master_narration",
   "party_action",
   "game_map_update",
@@ -1010,6 +1062,8 @@ const JSON_AGENTS = new Set([
   "haptic",
   "cyoa",
   "secret-plot-driver",
+  "canon-timeline",
+  "plot-architect",
 ]);
 
 /**

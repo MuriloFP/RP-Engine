@@ -112,6 +112,34 @@ export interface InventoryItem {
   location: string;
 }
 
+/** Reward type for quest completion. */
+export type QuestRewardType = "relationship" | "item" | "knowledge" | "access" | "skill" | "reputation" | "narrative";
+
+/** Penalty type for quest failure. */
+export type QuestPenaltyType = "relationship" | "injury" | "death" | "reputation" | "loss" | "narrative";
+
+/** Severity of a quest failure penalty. */
+export type QuestPenaltySeverity = "minor" | "moderate" | "severe" | "fatal";
+
+/** Difficulty rating for a quest. */
+export type QuestDifficulty = "trivial" | "easy" | "moderate" | "hard" | "deadly";
+
+/** Lifecycle status of a quest. */
+export type QuestStatus = "pending" | "active" | "completed" | "failed" | "rejected";
+
+/** A reward granted on quest completion. */
+export interface QuestReward {
+  type: QuestRewardType;
+  description: string;
+}
+
+/** A penalty applied on quest failure. */
+export interface QuestPenalty {
+  type: QuestPenaltyType;
+  description: string;
+  severity: QuestPenaltySeverity;
+}
+
 /** Quest progress data tracked in game state. */
 export interface QuestProgress {
   questEntryId: string;
@@ -119,4 +147,20 @@ export interface QuestProgress {
   currentStage: number;
   objectives: Array<{ text: string; completed: boolean }>;
   completed: boolean;
+  /** Lifecycle status. Defaults to "active" for backward compatibility. */
+  status?: QuestStatus;
+  /** Brief description of the quest shown in the HUD. */
+  description?: string;
+  /** Whether this quest cannot be rejected. */
+  mandatory?: boolean;
+  /** Difficulty rating, affects HUD display. */
+  difficulty?: QuestDifficulty;
+  /** Rewards granted on completion. */
+  rewards?: QuestReward[];
+  /** Penalties applied on failure. */
+  failurePenalty?: QuestPenalty[];
+  /** What happens if the player rejects this quest. Null if no special consequence. */
+  rejectionConsequences?: string | null;
+  /** When true, the quest's real significance is hidden from the player until revealed by narrative. */
+  hidden?: boolean;
 }

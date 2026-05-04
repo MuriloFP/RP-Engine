@@ -636,6 +636,66 @@ export async function chatsRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
+  // Accept or reject a pending quest
+  app.patch<{ Params: { id: string; questName: string } }>(
+    "/:id/game-state/quests/:questName/status",
+    async (req, reply) => {
+      const { createGameStateStorage } = await import("../services/storage/game-state.storage.js");
+      const gameStateStore = createGameStateStorage(app.db);
+      const body = req.body as { action: "accept" | "reject" };
+      if (!body.action || !["accept", "reject"].includes(body.action)) {
+        return reply.status(400).send({ error: 'action must be "accept" or "reject"' });
+      }
+
+      const msgs = await storage.listMessages(req.params.id);
+      let snap = null;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i]!.role === "assistant") {
+          const msg = msgs[i]!;
+          snap = await gameStateStore.getByMessage(msg.id, msg.activeSwipeIndex);
+          break;
+        }
+      }
+      if (!snap) {
+        snap = await gameStateStore.getLatest(req.params.id);
+      }
+      if (!snap) return reply.status(404).send({ error: "No game state found" });
+
+      const ps = snap.playerStats
+        ? typeof snap.playerStats === "string"
+          ? JSON.parse(snap.playerStats)
+          : snap.playerStats
+        : { stats: [], attributes: null, skills: {}, inventory: [], activeQuests: [], status: "" };
+
+      const quests: any[] = ps.activeQuests ?? [];
+      const questName = decodeURIComponent(req.params.questName);
+      const idx = quests.findIndex((q: any) => q.name === questName);
+      if (idx === -1) return reply.status(404).send({ error: "Quest not found" });
+
+      const quest = quests[idx];
+      if (quest.mandatory && body.action === "reject") {
+        return reply.status(400).send({ error: "Cannot reject a mandatory quest" });
+      }
+
+      if (body.action === "accept") {
+        quest.status = "active";
+      } else {
+        quest.status = "rejected";
+      }
+
+      const mergedPS = { ...ps, activeQuests: quests };
+      const { eq } = await import("drizzle-orm");
+      const { gameStateSnapshots } = await import("../db/schema/index.js");
+      await app.db
+        .update(gameStateSnapshots)
+        .set({ playerStats: JSON.stringify(mergedPS) })
+        .where(eq(gameStateSnapshots.id, (snap as any).id));
+
+      logger.info('[quest] %s quest "%s" in chat %s', body.action, questName, req.params.id);
+      return { quest, playerStats: mergedPS };
+    },
+  );
+
   // Peek prompt — assemble the prompt for this chat as if generating right now
   app.post<{ Params: { id: string } }>("/:id/peek-prompt", async (req, reply) => {
     const chat = await storage.getById(req.params.id);
